@@ -1,0 +1,224 @@
+import sys
+
+# ==============================================================================
+# 1. HARDWARE CONFIGURATION & PIN DEFINITIONS
+# ==============================================================================
+
+CONFIG = {
+ "PINS": {
+ # Pump MOSFET Gate Pins (BCM / Board numbering)
+ "PUMP_A": 17,
+ "PUMP_B": 27,
+ "PUMP_C": 22,
+ # HX711 Load Cell Pins
+ "SCALE_DT": 5,
+ "SCALE_SCK": 6,
+ },
+ "CONVERSIONS": {
+ # 1 fluid ounce of water ≈ 28.35 grams (update per liquid density if needed)
+ "GRAMS_PER_OZ": 28.3495,
+ # HX711 calibration factor (obtained during initial physical scale calibration)
+ "SCALE_CALIBRATION_FACTOR": -7050,
+ },
+ "ARM_LIMITS": {
+ "BASE_SERVO_MIN_DEG": 0.0,
+ "BASE_SERVO_MAX_DEG": 270.0,
+ },
+ # Recipe profiles: Target fluid ounces for each step
+ "RECIPES": {
+ 4: [
+ {"liquid": "PUMP_A", "oz": 3.0},
+ {"liquid": "PUMP_B", "oz": 6.0},
+ {"liquid": "PUMP_A", "oz": 1.0},
+ ],
+ 1: [
+ {"liquid": "PUMP_A", "oz": 4.0},
+ {"liquid": "PUMP_C", "oz": 4.0},
+ ],
+ } }
+
+# ==============================================================================
+# 2. SCALE / LOAD CELL MODULE
+# ==============================================================================
+
+class ScaleController:
+ """
+ Interfaces with the scale / HX711 module.
+ Replaces raw calls with dummy reads when testing off-hardware.
+ """
+ def __init__(self, dout_pin: int, pd_sck_pin: int, cal_factor: float):
+ self.dout_pin = dout_pin
+ self.pd_sck_pin = pd_sck_pin
+ self.cal_factor = cal_factor
+ self.current_offset = 0.0
+ self._mock_weight = 0.0 # Used for simulated feedback testing
+ print(f"[INIT] Scale configured on DT={dout_pin}, SCK={pd_sck_pin}")
+ def tare(self):
+ """Zeroes out the scale with the empty cup placed."""
+ print("[SCALE] Taring scale...")
+ self.current_offset = self._read_raw()
+ self._mock_weight = 0.0
+ print("[SCALE] Tare complete. Current net weight: 0.00 oz")
+ def _read_raw(self) -> float:
+ # TODO: Replace with hx711.get_value() on physical Raspberry Pi
+ return self._mock_weight
+ def get_weight_oz(self) -> float:
+ """Returns the current poured weight in ounces relative to the tare."""
+ raw_val = self._read_raw()
+ grams = (raw_val - self.current_offset)
+ return round(grams / CONFIG["CONVERSIONS"]["GRAMS_PER_OZ"], 2)
+ def simulate_pour(self, rate_oz_per_sec: float, dt: float):
+ """Helper to simulate liquid flowing onto the load cell."""
+ self._mock_weight += (rate_oz_per_sec * dt) * CONFIG["CONVERSIONS"]["GRAMS_PER_OZ"]
+
+# ==============================================================================
+# 3. PUMP CONTROLLER (MOSFET TRIGGERING)
+# ==============================================================================
+
+class PumpController:
+ """
+ Controls DC peristaltic/diaphragm pumps via logic-level N-channel MOSFETs.
+ """
+ def __init__(self, pump_pins: dict):
+ self.pump_pins = pump_pins
+ for name, pin in self.pump_pins.items():
+ print(f"[INIT] Configured {name} on GPIO {pin}")
+ def set_pump(self, pump_name: str, state: bool):
+ pin = self.pump_pins.get(pump_name)
+ if not pin:
+ raise ValueError(f"Unknown pump designation: {pump_name}")
+ state_str = "ON (HIGH)" if state else "OFF (LOW)"
+ print(f"[PUMP] {pump_name} (GPIO {pin}) -> {state_str}")
+ # TODO: Physical hardware hook:
+ # RPi.GPIO.output(pin, GPIO.HIGH if state else GPIO.LOW)
+ def stop_all(self):
+ """Emergency stop & safety clear."""
+ print("[PUMP] Shutting down all pumps...")
+ for pump_name in self.pump_pins:
+ self.set_pump(pump_name, False)
+
+# ==============================================================================
+# 4. HIWONDER ROBOTIC ARM CONTROLLER
+# ==============================================================================
+
+class HiwonderArm:
+ """
+ Handles high-level inverse kinematics / joint movement sequences.
+ Strictly clamps rotation to <= 270 degrees.
+ """
+ def __init__(self, min_deg: float = 0.0, max_deg: float = 270.0):
+ self.min_deg = min_deg
+ self.max_deg = max_deg
+ self.current_base_angle = 135.0 # Center position
+ def set_base_angle(self, target_angle: float):
+ """Enforces rotational boundary constraint."""
+ if not (self.min_deg <= target_angle <= self.max_deg):
+ raise ValueError(
+ f"[SAFETY FAULT] Requested base angle {target_angle}° violates boundary "
+ f"[{self.min_deg}°, {self.max_deg}°]"
+ )
+ self.current_base_angle = target_angle
+ print(f"[ARM] Base rotated to {self.current_base_angle}°")
+ def move_to_start_and_grab(self):
+ print("\n--- ARM SEQUENCE: Grab Empty Container ---")
+ self.set_base_angle(30.0)
+ # TODO: Call arm SDK to extend, descend, close gripper
+ print("[ARM] Gripper closed. Container acquired.")
+ def move_to_scale_and_release(self):
+ print("\n--- ARM SEQUENCE: Position on Scale ---")
+ self.set_base_angle(135.0)
+ # TODO: Descend gently onto scale plate, open gripper, retract
+ print("[ARM] Container placed squarely on scale load cell.")
+ def grab_and_move_to_end(self):
+ print("\n--- ARM SEQUENCE: Transfer Dispensed Cup to End ---")
+ self.set_base_angle(135.0)
+ # TODO: Close gripper gently around filled container
+ print("[ARM] Gripper clamped.")
+ self.set_base_angle(250.0)
+ # TODO: Open gripper at collection deck
+ print("[ARM] Container delivered to user pickup point.")
+
+# ==============================================================================
+# 5. MAIN CONTROL & SEQUENCING ENGINE
+# ==============================================================================
+
+class DrinkDispenserEngine:
+ def __init__(self):
+ self.scale = ScaleController(
+ CONFIG["PINS"]["SCALE_DT"],
+ CONFIG["PINS"]["SCALE_SCK"],
+ CONFIG["CONVERSIONS"]["SCALE_CALIBRATION_FACTOR"]
+ )
+ self.pumps = PumpController({
+ "PUMP_A": CONFIG["PINS"]["PUMP_A"],
+ "PUMP_B": CONFIG["PINS"]["PUMP_B"],
+ "PUMP_C": CONFIG["PINS"]["PUMP_C"]
+ })
+ self.arm = HiwonderArm(
+ min_deg=CONFIG["ARM_LIMITS"]["BASE_SERVO_MIN_DEG"],
+ max_deg=CONFIG["ARM_LIMITS"]["BASE_SERVO_MAX_DEG"]
+ )
+ def dispense_ingredient(self, pump_name: str, target_oz: float, timeout_sec: float = 15.0):
+ """
+ Closed-loop dispensing:
+ Pumps liquid while polling scale feedback until the delta meets target_oz.
+ """
+ print(f"\n[DISPENSE] Starting {pump_name} for target: {target_oz:.2f} oz")
+ start_weight = self.scale.get_weight_oz()
+ cutoff_weight = start_weight + target_oz
+ start_time = time.time()
+ self.pumps.set_pump(pump_name, True)
+ try:
+ while True:
+ # In simulation: increase mock weight (approx 1.5 oz/sec)
+ self.scale.simulate_pour(rate_oz_per_sec=1.5, dt=0.05)
+ time.sleep(0.05)
+ current_weight = self.scale.get_weight_oz()
+ net_poured = current_weight - start_weight
+ print(f" -> Dispensing {pump_name}: {net_poured:.2f} / {target_oz:.2f} oz", end="\r")
+ # Check if poured quantity reached
+ if current_weight >= cutoff_weight:
+ self.pumps.set_pump(pump_name, False)
+ print(f"\n[DISPENSE] Complete: Added {net_poured:.2f} oz.")
+ break
+ # Safety timeout check
+ if time.time() - start_time > timeout_sec:
+ raise TimeoutError(f"Flow rate fault: {pump_name} timed out before reaching target weight.")
+ except Exception as e:
+ self.pumps.stop_all()
+ raise e
+ def run_recipe(self, recipe_number: int):
+ recipe = CONFIG["RECIPES"].get(recipe_number)
+ if not recipe:
+ print(f"[ERROR] Recipe #{recipe_number} not found.")
+ return
+
+ print(f"\n=======================================================")
+ print(f" EXECUTION START: Recipe #{recipe_number}")
+ print(f"=======================================================")
+
+ try:
+ # 1. Robotic Positioning: Move container from start to scale
+ self.arm.move_to_start_and_grab()
+ self.arm.move_to_scale_and_release()
+ # 2. Tare out scale weight
+ self.scale.tare()
+ # 3. Ingredient Dispensing: Iterate through the recipe sequence
+ for step_idx, step in enumerate(recipe, start=1):
+ print(f"\n[STEP {step_idx}/{len(recipe)}] Liquid: {step['liquid']}")
+ self.dispense_ingredient(step["liquid"], step["oz"])
+ time.sleep(0.5) # Settling delay between pump triggers
+ # 4. Final delivery
+ self.arm.grab_and_move_to_end()
+ print("\n[SUCCESS] Dispense sequence fully executed.")
+ except Exception as err:
+ self.pumps.stop_all()
+ print(f"\n[FAULT ENCOUNTERED] {err}")
+
+# ==============================================================================
+# ENTRY POINT
+# ==============================================================================
+
+if __name__ == "__main__":
+ app = DrinkDispenserEngine()
+ # Test recipe #4: 3 oz Pump A -
