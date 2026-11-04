@@ -1,24 +1,26 @@
 """
-pumps.py - Pump control for the RDDS (Raspberry Pi 4 -> PWM MOSFET trigger modules)
+This script is designed as a small Pump Script module (pumps.py - 
+Pump control for the RDDS (Raspberry Pi 4 -> PWM MOSFET trigger modules)) 
+that is available to be imported into the main firmwave of this system.
 
-Wiring (BCM GPIO numbers, from the electrical schematic):
+- Wiring (GPIO numbers, from the 'Electrical Schematic | RDDS'):
     Pump 1 / PUMP_A -> GPIO 17  (module TRIG/PWM)
     Pump 2 / PUMP_B -> GPIO 22
     Pump 3 / PUMP_C -> GPIO  5
 
-HIGH on a pin turns that pump ON, LOW turns it OFF. The modules have a pull-down
-on the trigger input, so the pumps stay off while the Pi boots.
-All pins start LOW. Every run path ends with the pump switched OFF, even on an
-error or Ctrl-C.
+    HIGH on a pin turns that pump ON, LOW turns it OFF. The modules have a pull-down
+    on the trigger input, so the pumps stay off while the Pi boots.
+    All pins start LOW. Every run path ends with the pump switched OFF, even on an
+    error or Ctrl-C.
 
-Use in the firmware:
+- Export for firmware:
     from pumps import PumpController
     pumps = PumpController()
     pumps.on("PUMP_A")        # start pouring
     pumps.off("PUMP_A")       # cutoff
     pumps.stop_all()          # fault / emergency stop
 
-Bench tests (run on the Pi, tubes in a cup of water, NOT on the scale):
+- Bench tests (run on the Pi, tubes in a cup of water, NOT on the scale):
     python3 pumps.py test             # each pump runs 1 s in turn
     python3 pumps.py run A 3          # pump A for 3 s
     python3 pumps.py flow A 5         # run 5 s, you weigh the output -> grams/second
@@ -90,7 +92,7 @@ class PumpController:
             d.close()
 
 
-# ------------------------------------------------------------------ bench tests
+# Bench Tests
 def main():
     ap = argparse.ArgumentParser(description="RDDS pump bench tests")
     sub = ap.add_subparsers(dest="cmd", required=True)
