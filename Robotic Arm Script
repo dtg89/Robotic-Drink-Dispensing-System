@@ -1,0 +1,202 @@
+"""
+This script is designed as a small Arm Script module (arm.py -
+Hiwonder xArm 1S pick / place / serve sequences for the RDDS (Raspberry Pi 4))
+that is available to be imported into the main firmware of this system.
+
+- Connection: xArm 1S controller -> Pi over USB, using the 'xarm' Python package
+    pip install xarm          (on the Pi; add --break-system-packages if pip asks)
+    If you get a USB permission error, run with sudo, or add a udev rule for
+    VID 0483 / PID 5750.
+
+- How the motion works (no inverse kinematics):
+    You pose the arm by hand once ("teach"), and the script saves the servo
+    positions (0-1000 units, 500 = center) for seven named poses and two gripper
+    values in arm_poses.json. The sequences then replay those poses.
+    Poses (servos 2-6): HOME, PICK_ABOVE, PICK, SCALE_ABOVE, SCALE, SERVE_ABOVE, SERVE
+    Gripper (servo 1):  GRIP_OPEN, GRIP_CLOSED (taught while holding the cup)
+    HOME must be clear of the scale and the nozzles.
+
+- Export for firmware:
+    from arm import XArm
+    arm = XArm()
+    arm.home()
+    arm.move_to_start_and_grab()          # pick the empty glass
+    arm.move_to_scale_and_release()       # place it on the scale, retract to HOME
+    arm.grab_and_move_to_end()            # lift the filled glass to the serving area
+
+- Bench tests (run on the Pi, arm clear and a hand ready near the power):
+    python3 arm.py read                   # live servo positions (find which ID is which)
+    python3 arm.py teach                  # guided: servos go limp, you pose, Enter saves
+    python3 arm.py list                   # show the saved poses
+    python3 arm.py go HOME                # move to one pose
+    python3 arm.py grip open|closed       # gripper only
+    python3 arm.py run pick               # HOME -> pick up glass -> place on scale -> HOME
+    python3 arm.py run serve              # scale -> serving area -> HOME
+"""
+
+import json
+import os
+import sys
+import time
+
+GRIPPER_ID = 1                      # claw servo. Confirm with:  python3 arm.py read
+JOINT_IDS = [2, 3, 4, 5, 6]         # wrist rotate .. base (taught as one pose)
+MOVE_MS = 1500                      # joint move time: slow enough not to spill
+GRIP_MS = 600
+POSES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arm_poses.json")
+
+POSE_NAMES = ["HOME", "PICK_ABOVE", "PICK", "SCALE_ABOVE", "SCALE", "SERVE_ABOVE", "SERVE"]
+TEACH_HINTS = {
+    "HOME":        "Arm folded clear of the scale, the nozzles and the cup positions",
+    "PICK_ABOVE":  "Gripper open, hovering just above the empty glass at the pick-up spot",
+    "PICK":        "Gripper open, lowered around the glass, ready to close",
+    "SCALE_ABOVE": "Holding the glass, hovering above the scale platform",
+    "SCALE":       "Holding the glass, lowered so it just touches the platform center",
+    "SERVE_ABOVE": "Holding the glass, hovering above the serving spot",
+    "SERVE":       "Holding the glass, lowered onto the serving spot",
+}
+
+
+class XArm:
+    def __init__(self, controller=None, poses_file=POSES_FILE):
+        if controller is None:
+            import xarm
+            controller = xarm.Controller("USB")
+        self.arm = controller
+        try:
+            with open(poses_file) as f:
+                data = json.load(f)
+            self.poses, self.grip = data["poses"], data["grip"]
+        except (FileNotFoundError, KeyError, ValueError):
+            raise RuntimeError("Arm poses not taught yet. Run: python3 arm.py teach")
+        print(f"[INIT] xArm connected, {len(self.poses)} poses loaded")
+
+    # Low-level moves
+    def _clamp(self, pos):
+        return max(0, min(1000, int(pos)))
+
+    def _move(self, name, ms=MOVE_MS):
+        pose = self.poses[name]
+        pairs = [[int(sid), self._clamp(pos)] for sid, pos in pose.items()]
+        print(f"[ARM] -> {name}")
+        self.arm.setPosition(pairs, duration=ms, wait=True)
+
+    def _grip(self, state):
+        pos = self._clamp(self.grip[state])
+        print(f"[ARM] gripper {state}")
+        self.arm.setPosition(GRIPPER_ID, pos, duration=GRIP_MS, wait=True)
+
+    # Sequences (names match the firmware)
+    def home(self):
+        self._grip("open")
+        self._move("HOME")
+
+    def move_to_start_and_grab(self):
+        self._grip("open")
+        self._move("PICK_ABOVE")
+        self._move("PICK")
+        self._grip("closed")
+        self._move("PICK_ABOVE")
+
+    def move_to_scale_and_release(self):
+        self._move("SCALE_ABOVE")
+        self._move("SCALE")
+        self._grip("open")
+        self._move("SCALE_ABOVE")
+        self._move("HOME")
+
+    def grab_and_move_to_end(self):
+        self._move("SCALE_ABOVE")
+        self._move("SCALE")
+        self._grip("closed")
+        self._move("SCALE_ABOVE")
+        self._move("SERVE_ABOVE")
+        self._move("SERVE")
+        self._grip("open")
+        self._move("SERVE_ABOVE")
+        self._move("HOME")
+
+
+# Bench Tests
+def _positions(c):
+    return {sid: c.getPosition(sid) for sid in range(1, 7)}
+
+
+def _hold_here(c):
+    """Re-power the servos at their current positions so the arm stops being limp."""
+    pos = _positions(c)
+    c.setPosition([[sid, p] for sid, p in pos.items()], duration=500, wait=True)
+
+
+def _tool_read(c):
+    print("Move servos by hand to see which ID changes (this is how you confirm the claw ID).")
+    c.servoOff()
+    try:
+        while True:
+            print("  ".join(f"S{sid}:{p:4d}" for sid, p in _positions(c).items()), end="\r")
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print()
+        _hold_here(c)
+
+
+def _tool_teach(c):
+    print("TEACH MODE: the servos go limp. SUPPORT the arm with your hand at each step.")
+    poses, grip = {}, {}
+    # Order: both gripper values first, then the seven poses (hold the glass for SCALE_ABOVE..SERVE).
+    steps = [("grip", "open"), ("grip", "closed")] + [("pose", n) for n in POSE_NAMES]
+    for kind, name in steps:
+        c.servoOff()
+        if kind == "grip" and name == "open":
+            msg = "GRIPPER OPEN: open the claw by hand, wide enough to go around the glass"
+        elif kind == "grip":
+            msg = "GRIPPER CLOSED: put the glass in the claw and close it by hand until it grips (not crushing)"
+        else:
+            msg = f"{name}: {TEACH_HINTS[name]}"
+        input(f"\n{msg}\n  Position it, hold it steady, then press Enter... ")
+        pos = _positions(c)
+        if kind == "grip":
+            grip[name] = pos[GRIPPER_ID]
+            print(f"  saved gripper {name} = {grip[name]}")
+        else:
+            poses[name] = {str(s): pos[s] for s in JOINT_IDS}
+            print(f"  saved {name} = {poses[name]}")
+        _hold_here(c)
+    with open(POSES_FILE, "w") as f:
+        json.dump({"poses": poses, "grip": grip}, f, indent=2)
+    print(f"\nSaved to {POSES_FILE}. Test with:  python3 arm.py go HOME   then   python3 arm.py run pick")
+
+
+def main():
+    usage = __doc__
+    if len(sys.argv) < 2:
+        print(usage)
+        return 1
+    cmd = sys.argv[1]
+    if cmd in ("read", "teach"):
+        import xarm
+        c = xarm.Controller("USB")
+        (_tool_read if cmd == "read" else _tool_teach)(c)
+        return 0
+    arm = XArm()
+    try:
+        if cmd == "list":
+            print(json.dumps({"poses": arm.poses, "grip": arm.grip}, indent=2))
+        elif cmd == "go":
+            arm._move(sys.argv[2].upper())
+        elif cmd == "grip":
+            arm._grip(sys.argv[2].lower())
+        elif cmd == "run" and sys.argv[2] == "pick":
+            arm.home(); arm.move_to_start_and_grab(); arm.move_to_scale_and_release()
+        elif cmd == "run" and sys.argv[2] == "serve":
+            arm.grab_and_move_to_end()
+        else:
+            print(usage)
+            return 1
+    except KeyboardInterrupt:
+        print("\nInterrupted: the arm stays where it is.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
