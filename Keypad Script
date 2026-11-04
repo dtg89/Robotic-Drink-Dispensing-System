@@ -1,1 +1,147 @@
+"""
+This script is designed as a small Keypad Script module (keypad.py - Non-blocking 
+4x4 matrix keypad driver for the RDDS (Raspberry Pi 4) that is available to be imported 
+into the main firmwave of this system.
 
+- Wiring (GPIO numbers, from the 'Electrical Schematic | RDDS'):
+    Rows    R1..R4 -> GPIO 23, 24, 25, 8   (outputs, idle HIGH)
+    Columns C1..C4 -> GPIO 7, 12, 16, 20   (inputs, internal pull-ups, idle HIGH)
+
+- Expected Performance:
+    - Drives one row LOW at a time and reads all four columns.
+    - A pressed key pulls its column LOW.
+    - A key is confirmed only after it is held steady for 20 ms (software debounce).
+    - Only '1', '2', '3' are accepted. Everything else ('4'-'9', '0', 'A'-'D',
+      '*', '#') is ignored: poll() returns None, so the FSM does not progress.
+    - Each physical press is reported once, even if the key is held down.
+
+- Script to be exported in firmware:
+    from keypad import Keypad
+    pad = Keypad()
+    key = pad.poll()
+    if key is not None:
+        start_recipe(key)          # key is '1', '2' or '3'
+
+- Test modes (run on the Pi):
+    python3 keypad.py          # Prints keys
+    python3 keypad.py --map    # Prints (row, col) of every press
+"""
+
+import sys
+import time
+
+ROW_PINS = [23, 24, 25, 8]   # R1..R4
+COL_PINS = [7, 12, 16, 20]   # C1..C4
+
+# Standard 4x4 layout. 
+KEYMAP = [
+    ["1", "2", "3", "A"],
+    ["4", "5", "6", "B"],
+    ["7", "8", "9", "C"],
+    ["*", "0", "#", "D"],
+]
+
+VALID_KEYS = {"1", "2", "3"}
+DEBOUNCE_S = 0.020   # 20 ms software debounce
+SETTLE_S = 0.0002    # let the row line settle before reading the columns
+
+
+class Keypad:
+    def __init__(self, row_pins=ROW_PINS, col_pins=COL_PINS, keymap=KEYMAP,
+                 valid_keys=VALID_KEYS, debounce_s=DEBOUNCE_S):
+        from gpiozero import DigitalOutputDevice, DigitalInputDevice
+
+        # Rows: outputs, default HIGH (on() = HIGH, off() = LOW)
+        self.rows = [DigitalOutputDevice(p, active_high=True, initial_value=True)
+                     for p in row_pins]
+        # Columns: inputs with internal pull-up (is_active is True when pin is LOW)
+        self.cols = [DigitalInputDevice(p, pull_up=True) for p in col_pins]
+
+        self.keymap = keymap
+        self.valid_keys = set(valid_keys)
+        self.debounce_s = debounce_s
+
+        self._candidate = None    # key currently being debounced
+        self._since = 0.0         # when the candidate first appeared
+        self._latched = False     # True once this press has been reported
+        self.last_rejected = None  # most recent confirmed-but-invalid key
+
+    def _scan_raw(self):
+        """One full scan. Returns a list of (row, col) for every pressed key."""
+        pressed = []
+        for r, row in enumerate(self.rows):
+            row.off()                      # drive this row LOW
+            time.sleep(SETTLE_S)
+            for c, col in enumerate(self.cols):
+                if col.is_active:          # column pulled LOW -> key pressed
+                    pressed.append((r, c))
+            row.on()                       # back to HIGH
+        return pressed
+
+    def poll(self):
+        """
+        Non-blocking. Call often (every 1-10 ms).
+        Returns '1', '2' or '3' once per confirmed press, otherwise None.
+        """
+        pressed = self._scan_raw()
+        now = time.monotonic()
+
+        # Exactly one key must be down; none or several count as "no key".
+        key = None
+        if len(pressed) == 1:
+            r, c = pressed[0]
+            key = self.keymap[r][c]
+
+        if key is None:
+            self._candidate = None
+            self._latched = False
+            return None
+
+        if key != self._candidate:         # new key: start the debounce timer
+            self._candidate = key
+            self._since = now
+            self._latched = False
+            return None
+
+        if not self._latched and (now - self._since) >= self.debounce_s:
+            self._latched = True           # report this press only once
+            if key in self.valid_keys:
+                return key
+            self.last_rejected = key       # invalid key: ignored, no progress
+        return None
+
+    def close(self):
+        for d in self.rows + self.cols:
+            d.close()
+
+
+# Test Modes
+if __name__ == "__main__":
+    all_keys = {k for row in KEYMAP for k in row}
+    map_mode = "--map" in sys.argv
+    pad = Keypad(valid_keys=all_keys if map_mode else VALID_KEYS)
+
+    if map_mode:
+        print("WIRING CHECK: press each key. Prints (row, col) and the key it maps to.")
+        print("Row 0..3 = R1..R4, Col 0..3 = C1..C4. Ctrl-C to quit.")
+    else:
+        print("Keypad test: press 1, 2 or 3 (accepted). Other keys are ignored. Ctrl-C to quit.")
+
+    try:
+        while True:
+            key = pad.poll()
+            if key is not None:
+                if map_mode:
+                    for r, row in enumerate(KEYMAP):
+                        if key in row:
+                            print(f"key '{key}'  -> row {r} (R{r + 1}), col {row.index(key)} (C{row.index(key) + 1})")
+                else:
+                    print(f"ACCEPTED: {key}")
+            elif pad.last_rejected is not None:
+                print(f"ignored:  {pad.last_rejected}")
+                pad.last_rejected = None
+            time.sleep(0.002)
+    except KeyboardInterrupt:
+        print("\nDone.")
+    finally:
+        pad.close()
