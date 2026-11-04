@@ -1,1 +1,130 @@
+"""
+pumps.py - Pump control for the RDDS (Raspberry Pi 4 -> PWM MOSFET trigger modules)
 
+Wiring (BCM GPIO numbers, from the electrical schematic):
+    Pump 1 / PUMP_A -> GPIO 17  (module TRIG/PWM)
+    Pump 2 / PUMP_B -> GPIO 22
+    Pump 3 / PUMP_C -> GPIO  5
+
+HIGH on a pin turns that pump ON, LOW turns it OFF. The modules have a pull-down
+on the trigger input, so the pumps stay off while the Pi boots.
+All pins start LOW. Every run path ends with the pump switched OFF, even on an
+error or Ctrl-C.
+
+Use in the firmware:
+    from pumps import PumpController
+    pumps = PumpController()
+    pumps.on("PUMP_A")        # start pouring
+    pumps.off("PUMP_A")       # cutoff
+    pumps.stop_all()          # fault / emergency stop
+
+Bench tests (run on the Pi, tubes in a cup of water, NOT on the scale):
+    python3 pumps.py test             # each pump runs 1 s in turn
+    python3 pumps.py run A 3          # pump A for 3 s
+    python3 pumps.py flow A 5         # run 5 s, you weigh the output -> grams/second
+"""
+
+import argparse
+import sys
+import time
+
+PUMP_PINS = {"PUMP_A": 17, "PUMP_B": 22, "PUMP_C": 5}
+MAX_ON_S = 20.0   # hard cap for run_for(); the dispense loop has its own timeout
+
+
+def _name(name):
+    """Accept 'A', 'a', 'PUMP_A' -> 'PUMP_A'."""
+    n = str(name).upper()
+    return n if n.startswith("PUMP_") else "PUMP_" + n
+
+
+class PumpController:
+    def __init__(self, pins=PUMP_PINS, device_factory=None):
+        if device_factory is None:
+            from gpiozero import DigitalOutputDevice
+            device_factory = lambda pin: DigitalOutputDevice(
+                pin, active_high=True, initial_value=False)   # start LOW (off)
+        self.pins = dict(pins)
+        self.devs = {n: device_factory(p) for n, p in self.pins.items()}
+        for n, p in self.pins.items():
+            print(f"[INIT] {n} on GPIO {p} (OFF)")
+
+    def _dev(self, name):
+        n = _name(name)
+        if n not in self.devs:
+            raise ValueError(f"Unknown pump '{name}'. Use one of {list(self.devs)}")
+        return n, self.devs[n]
+
+    def on(self, name):
+        n, d = self._dev(name)
+        d.on()
+        print(f"[PUMP] {n} (GPIO {self.pins[n]}) -> ON")
+
+    def off(self, name):
+        n, d = self._dev(name)
+        d.off()
+        print(f"[PUMP] {n} (GPIO {self.pins[n]}) -> OFF")
+
+    def is_on(self, name):
+        return bool(self._dev(name)[1].value)
+
+    def stop_all(self):
+        """Emergency stop: every pump LOW."""
+        print("[PUMP] STOP ALL")
+        for d in self.devs.values():
+            d.off()
+
+    def run_for(self, name, seconds, max_s=MAX_ON_S):
+        """Timed run for testing. Always switches the pump off afterwards."""
+        if not (0 < seconds <= max_s):
+            raise ValueError(f"seconds must be > 0 and <= {max_s}")
+        self.on(name)
+        try:
+            time.sleep(seconds)
+        finally:
+            self.off(name)
+
+    def close(self):
+        self.stop_all()
+        for d in self.devs.values():
+            d.close()
+
+
+# ------------------------------------------------------------------ bench tests
+def main():
+    ap = argparse.ArgumentParser(description="RDDS pump bench tests")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("test", help="run each pump for 1 s in turn")
+    r = sub.add_parser("run", help="run one pump for N seconds")
+    r.add_argument("pump")
+    r.add_argument("seconds", type=float)
+    f = sub.add_parser("flow", help="measure flow rate (grams/second)")
+    f.add_argument("pump")
+    f.add_argument("seconds", type=float)
+    args = ap.parse_args()
+
+    pumps = PumpController()
+    try:
+        if args.cmd == "test":
+            for n in pumps.devs:
+                pumps.run_for(n, 1.0)
+                time.sleep(1.0)
+        elif args.cmd == "run":
+            pumps.run_for(args.pump, args.seconds)
+        elif args.cmd == "flow":
+            print("Put the tube in an EMPTY cup on a kitchen scale (or the load cell).")
+            input("Press Enter to start... ")
+            pumps.run_for(args.pump, args.seconds)
+            grams = float(input("Grams collected: "))
+            rate = grams / args.seconds
+            print(f"Flow rate: {rate:.2f} g/s at 7.5 V")
+            print("Use this to estimate W_lead: grams that keep flowing after cutoff "
+                  "(tune it with a few real pours).")
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+    finally:
+        pumps.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
