@@ -1,4 +1,5 @@
 import sys
+import time
 
 # ==============================================================================
 # 1. HARDWARE CONFIGURATION & PIN DEFINITIONS
@@ -8,11 +9,14 @@ CONFIG = {
  "PINS": {
  # Pump MOSFET Gate Pins (BCM / Board numbering)
  "PUMP_A": 17,
- "PUMP_B": 27,
- "PUMP_C": 22,
+ "PUMP_B": 22,
+ "PUMP_C": 5,
+# Keypad Pins
+ "KEY_ROWS': [23, 24, 25, 8],
+ "KEY_COLS": [7, 12, 16, 20],
  # HX711 Load Cell Pins
- "SCALE_DT": 5,
- "SCALE_SCK": 6,
+ "SCALE_DT": 13,
+ "SCALE_SCK": 26,
  },
  "CONVERSIONS": {
  # 1 fluid ounce of water ≈ 28.35 grams (update per liquid density if needed)
@@ -53,15 +57,18 @@ class ScaleController:
  self.current_offset = 0.0
  self._mock_weight = 0.0 # Used for simulated feedback testing
  print(f"[INIT] Scale configured on DT={dout_pin}, SCK={pd_sck_pin}")
+ 
  def tare(self):
  """Zeroes out the scale with the empty cup placed."""
  print("[SCALE] Taring scale...")
  self.current_offset = self._read_raw()
  self._mock_weight = 0.0
  print("[SCALE] Tare complete. Current net weight: 0.00 oz")
+ 
  def _read_raw(self) -> float:
  # TODO: Replace with hx711.get_value() on physical Raspberry Pi
  return self._mock_weight
+ 
  def get_weight_oz(self) -> float:
  """Returns the current poured weight in ounces relative to the tare."""
  raw_val = self._read_raw()
