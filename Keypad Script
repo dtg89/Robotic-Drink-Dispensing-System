@@ -1,30 +1,28 @@
 """
-This script is designed as a small Keypad Script module (keypad.py - Non-blocking 
-4x4 matrix keypad driver for the RDDS (Raspberry Pi 4) that is available to be imported 
-into the main firmwave of this system.
+This script is designed as a small Keypad Script module (keypad.py -
+Non-blocking 4x4 matrix keypad driver for the RDDS (Raspberry Pi 4))
+that is available to be imported into the main firmware of this system.
 
 - Wiring (GPIO numbers, from the 'Electrical Schematic | RDDS'):
     Rows    R1..R4 -> GPIO 23, 24, 25, 8   (outputs, idle HIGH)
     Columns C1..C4 -> GPIO 7, 12, 16, 20   (inputs, internal pull-ups, idle HIGH)
 
-- Expected Performance:
-    - Drives one row LOW at a time and reads all four columns.
-    - A pressed key pulls its column LOW.
-    - A key is confirmed only after it is held steady for 20 ms (software debounce).
-    - Only '1', '2', '3' are accepted. Everything else ('4'-'9', '0', 'A'-'D',
-      '*', '#') is ignored: poll() returns None, so the FSM does not progress.
-    - Each physical press is reported once, even if the key is held down.
+    Drives one row LOW at a time and reads all four columns. A pressed key pulls
+    its column LOW and is confirmed only after it is held steady for 20 ms
+    (software debounce). Only '1', '2', '3' are accepted. Everything else
+    ('4'-'9', '0', 'A'-'D', '*', '#') is ignored: poll() returns None, so the
+    FSM does not progress. Each physical press is reported once, even if the
+    key is held down.
 
-- Script to be exported in firmware:
+- Export for firmware (call poll() every loop tick; it never blocks):
     from keypad import Keypad
     pad = Keypad()
-    key = pad.poll()
-    if key is not None:
-        start_recipe(key)          # key is '1', '2' or '3'
+    key = pad.poll()               # '1', '2', '3', or None
 
-- Test modes (run on the Pi):
-    python3 keypad.py          # Prints keys
-    python3 keypad.py --map    # Prints (row, col) of every press
+- Bench tests (run on the Pi):
+    python3 keypad.py              # prints accepted keys; shows rejected ones too
+    python3 keypad.py --map        # prints (row, col) of every press: use this to
+                                   # confirm which keypad pin is which
 """
 
 import sys
@@ -33,7 +31,8 @@ import time
 ROW_PINS = [23, 24, 25, 8]   # R1..R4
 COL_PINS = [7, 12, 16, 20]   # C1..C4
 
-# Standard 4x4 layout. 
+# Standard 4x4 layout. If --map shows different results for your keypad,
+# edit this table (or reorder the pin lists above) to match.
 KEYMAP = [
     ["1", "2", "3", "A"],
     ["4", "5", "6", "B"],
@@ -115,7 +114,7 @@ class Keypad:
             d.close()
 
 
-# Test Modes
+# Bench Tests
 if __name__ == "__main__":
     all_keys = {k for row in KEYMAP for k in row}
     map_mode = "--map" in sys.argv
