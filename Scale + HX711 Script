@@ -1,1 +1,210 @@
+"""
+This script is designed as a small Scale Script module (scale.py -
+HX711 load-cell scale for the RDDS (Raspberry Pi 4))
+that is available to be imported into the main firmware of this system.
 
+- Wiring (GPIO numbers, from the 'Electrical Schematic | RDDS'):
+    HX711 DT  -> GPIO 13
+    HX711 SCK -> GPIO 26
+    HX711 VCC -> Pi 3.3V pin (NOT 5V: DT drives a 3.3V-only GPIO)
+    HX711 GND -> GND
+
+    The HX711 is read directly (bit-banged, channel A, gain 128) using lgpio,
+    which comes with gpiozero on Raspberry Pi OS. Falls back to RPi.GPIO if
+    lgpio is missing. The calibration factor (counts per gram) is saved to
+    scale_calibration.json and loaded automatically.
+
+- Export for firmware:
+    from scale import Scale
+    scale = Scale()                 # loads the saved calibration factor
+    scale.tare()                    # empty cup on the platform
+    w = scale.get_grams()           # net grams relative to the tare
+    ok = scale.has_cup()            # True if > 40 g on the platform (test T05)
+
+- Bench tests (run on the Pi):
+    python3 scale.py raw            # raw counts: check wiring, press the platform
+    python3 scale.py calibrate      # guided calibration with a known weight
+    python3 scale.py read           # live grams (after calibrating)
+"""
+
+import json
+import os
+import statistics
+import sys
+import time
+
+DT_PIN = 13
+SCK_PIN = 26
+CAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "scale_calibration.json")
+CUP_MIN_G = 40.0   # glass present threshold (test T05)
+
+
+class _GPIO:
+    """Minimal pin access: DT as input, SCK as output. lgpio first, RPi.GPIO fallback."""
+
+    def __init__(self, dt, sck):
+        self.dt, self.sck_pin = dt, sck
+        try:
+            import lgpio
+            self._lg = lgpio
+            self._h = lgpio.gpiochip_open(0)
+            lgpio.gpio_claim_input(self._h, dt)
+            lgpio.gpio_claim_output(self._h, sck, 0)
+            self._backend = "lgpio"
+        except ImportError:
+            import RPi.GPIO as GPIO
+            self._rpi = GPIO
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(dt, GPIO.IN)
+            GPIO.setup(sck, GPIO.OUT, initial=GPIO.LOW)
+            self._backend = "RPi.GPIO"
+
+    def read(self):
+        if self._backend == "lgpio":
+            return self._lg.gpio_read(self._h, self.dt)
+        return self._rpi.input(self.dt)
+
+    def sck(self, value):
+        if self._backend == "lgpio":
+            self._lg.gpio_write(self._h, self.sck_pin, value)
+        else:
+            self._rpi.output(self.sck_pin, value)
+
+    def close(self):
+        if self._backend == "lgpio":
+            self._lg.gpiochip_close(self._h)
+        else:
+            self._rpi.cleanup([self.dt, self.sck_pin])
+
+
+class Scale:
+    def __init__(self, dt=DT_PIN, sck=SCK_PIN, cal_factor=None, gpio=None):
+        self._gpio = gpio if gpio is not None else _GPIO(dt, sck)
+        self.offset = 0.0          # raw counts at tare (set by tare())
+        self.cal_factor = cal_factor   # raw counts per gram
+        if self.cal_factor is None:
+            self.load_calibration()
+        print(f"[INIT] Scale on DT={dt}, SCK={sck}, "
+              f"cal_factor={self.cal_factor if self.cal_factor else 'NOT SET (run calibrate)'}")
+
+    # Raw Reads
+    def read_raw(self, timeout=1.0):
+        """One 24-bit reading (signed). Blocks until the HX711 has data (~100 ms at 10 SPS)."""
+        t0 = time.monotonic()
+        while self._gpio.read() == 1:              # DT HIGH = conversion not ready
+            if time.monotonic() - t0 > timeout:
+                raise TimeoutError(
+                    "HX711 not responding. Check VCC (3.3V), GND, DT=GPIO13, SCK=GPIO26.")
+            time.sleep(0.001)
+        value = 0
+        for _ in range(24):                        # MSB first
+            self._gpio.sck(1)
+            value = (value << 1) | self._gpio.read()
+            self._gpio.sck(0)
+        self._gpio.sck(1)                          # 25th pulse: channel A, gain 128
+        self._gpio.sck(0)
+        if value & 0x800000:                       # two's complement
+            value -= 1 << 24
+        return value
+
+    def read_median(self, n=5):
+        """Median of n raw readings (rejects the occasional bad sample)."""
+        return statistics.median(self.read_raw() for _ in range(n))
+
+    # Tare / Calibration
+    def tare(self, n=10):
+        """Zero the scale. Call with the empty cup on the platform."""
+        self.offset = self.read_median(n)
+        print(f"[SCALE] Tare complete (offset {self.offset:.0f} counts)")
+        return self.offset
+
+    def calibrate(self, known_grams, n=15):
+        """Call after tare() with a known mass on the platform."""
+        if known_grams <= 0:
+            raise ValueError("known_grams must be > 0")
+        raw = self.read_median(n)
+        self.cal_factor = (raw - self.offset) / known_grams
+        print(f"[SCALE] cal_factor = {self.cal_factor:.2f} counts/gram")
+        return self.cal_factor
+
+    def save_calibration(self):
+        with open(CAL_FILE, "w") as f:
+            json.dump({"cal_factor": self.cal_factor}, f)
+        print(f"[SCALE] Calibration saved to {CAL_FILE}")
+
+    def load_calibration(self):
+        try:
+            with open(CAL_FILE) as f:
+                self.cal_factor = json.load(f)["cal_factor"]
+            return True
+        except (FileNotFoundError, KeyError, ValueError):
+            return False
+
+    # Grams
+    def get_grams(self, n=3):
+        """
+        Net grams since the last tare. n=3 samples (median) is ~0.3 s at 10 SPS:
+        a good balance of noise rejection and speed for the pour loop.
+        """
+        if not self.cal_factor:
+            raise RuntimeError("Scale not calibrated. Run: python3 scale.py calibrate")
+        raw = self.read_median(n) if n > 1 else self.read_raw()
+        return (raw - self.offset) / self.cal_factor
+
+    def has_cup(self, min_grams=CUP_MIN_G):
+        """True if a glass is detected (use BEFORE taring)."""
+        return self.get_grams() > min_grams
+
+    def close(self):
+        self._gpio.close()
+
+
+# Bench Tests
+def _tool_raw(scale):
+    print("Raw counts. Press on the platform: the number should change. Ctrl-C to quit.")
+    last = []
+    while True:
+        v = scale.read_raw()
+        last = (last + [v])[-5:]
+        note = ""
+        if v in (0x7FFFFF, -0x800000):
+            note = "  <- SATURATED: check E+/E-/A+/A- wires"
+        elif len(last) == 5 and set(last) == {-1}:
+            note = "  <- stuck at -1: DT line floating or not connected"
+        print(f"{v:>10d}{note}")
+        time.sleep(0.1)
+
+
+def _tool_calibrate(scale):
+    input("1) Remove EVERYTHING from the platform, then press Enter... ")
+    scale.tare(n=15)
+    grams = float(input("2) Place a known weight on the platform. Weight in grams: "))
+    time.sleep(1.0)    # let it settle
+    scale.calibrate(grams)
+    scale.save_calibration()
+    time.sleep(0.5)
+    print(f"Check: the scale now reads {scale.get_grams(5):.1f} g (should be about {grams} g).")
+    print("Tip: remove it and put it on again, and verify with a second, different weight.")
+
+
+def _tool_read(scale):
+    input("Empty the platform (or place the empty cup), then press Enter to tare... ")
+    scale.tare()
+    print("Live grams. Ctrl-C to quit.")
+    while True:
+        print(f"{scale.get_grams():8.1f} g", end="\r")
+
+
+if __name__ == "__main__":
+    tools = {"raw": _tool_raw, "calibrate": _tool_calibrate, "read": _tool_read}
+    if len(sys.argv) != 2 or sys.argv[1] not in tools:
+        print(__doc__)
+        sys.exit(1)
+    scale = Scale()
+    try:
+        tools[sys.argv[1]](scale)
+    except KeyboardInterrupt:
+        print("\nDone.")
+    finally:
+        scale.close()
