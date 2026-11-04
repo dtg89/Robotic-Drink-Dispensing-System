@@ -3,7 +3,8 @@ This script is designed as the main Firmware module (firmware.py -
 supervisory finite state machine for the RDDS (Raspberry Pi 4)) that ties the
 keypad, pump and scale modules together with the xArm sequence.
 
-- Requires (same folder): keypad.py, pumps.py, scale.py
+- Requires (same folder): keypad.py, pumps.py, scale.py, arm.py (real runs; run
+  'python3 arm.py teach' once first)
 
 - State flow (matches the Level 2 figure):
     INITIALIZE -> IDLE (S0, scan keypad) -> LOAD_RECIPE (S1) -> PLACE_GLASS (S2)
@@ -73,22 +74,18 @@ class FaultError(Exception):
 
 # Arm
 class Arm:
-    """
-    Placeholder for the xArm 1S sequences. Paste your working xArm calls into the
-    three methods (your earlier HiwonderArm class can be dropped in unchanged:
-    these are the same method names).
-    """
+    """Print-only stand-in for --sim runs. The real arm is arm.py (XArm), same method names."""
     def home(self):
-        print("[ARM] Home")      # TODO: xArm calls
+        print("[ARM] Home")
 
     def move_to_start_and_grab(self):
-        print("[ARM] Pick up empty glass")      # TODO: xArm calls
+        print("[ARM] Pick up empty glass")
 
     def move_to_scale_and_release(self):
-        print("[ARM] Place glass on scale, retract clear of the nozzles")   # TODO: xArm calls
+        print("[ARM] Place glass on scale, retract clear of the nozzles")
 
     def grab_and_move_to_end(self):
-        print("[ARM] Grab filled glass, deliver to serving area")      # TODO: xArm calls
+        print("[ARM] Grab filled glass, deliver to serving area")
 
 
 # Simulation (no hardware)
@@ -275,8 +272,9 @@ def main():
         app = DrinkDispenser(_SimKeypad([args.key]), pumps, _SimScale(pumps, args.sim_rate),
                              Arm(), once=True)
     else:
+        from arm import XArm                                  # needs: pip install xarm, and poses taught
         pumps = PumpController()
-        app = DrinkDispenser(Keypad(), pumps, Scale(), Arm())
+        app = DrinkDispenser(Keypad(), pumps, Scale(), XArm())
     app.run()
 
 
