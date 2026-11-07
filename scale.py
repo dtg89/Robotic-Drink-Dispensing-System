@@ -37,7 +37,7 @@ DT_PIN = 13
 SCK_PIN = 26
 CAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "scale_calibration.json")
-CUP_MIN_G = 40.0   # glass present threshold (test T05)
+CUP_MIN_G = 10.0   # glass present threshold (test T05)
 
 
 class _GPIO:

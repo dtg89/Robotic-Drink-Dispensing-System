@@ -36,14 +36,14 @@ from pumps import PumpController
 from scale import Scale
 
 # Configuration
-# Recipes: (pump, target grams). Totals: 1 = 120 g, 2 = 135 g, 3 = 150 g.
+# Recipes: (pump, target grams). Totals: 1 = 30 g, 2 = 30 g, 3 = 30 g (ratios 1:2:1, 1:1:1, 2:1:2).
 RECIPES = {
-    "1": [("PUMP_A", 30), ("PUMP_B", 60), ("PUMP_C", 30)],
-    "2": [("PUMP_A", 45), ("PUMP_B", 45), ("PUMP_C", 45)],
-    "3": [("PUMP_A", 60), ("PUMP_B", 30), ("PUMP_C", 60)],
+    "1": [("PUMP_A", 7.5), ("PUMP_B", 15), ("PUMP_C", 7.5)],
+    "2": [("PUMP_A", 10), ("PUMP_B", 10), ("PUMP_C", 10)],
+    "3": [("PUMP_A", 12), ("PUMP_B", 6), ("PUMP_C", 12)],
 }
 
-W_LEAD_G = {"PUMP_A": 1.0, "PUMP_B": 1.0, "PUMP_C": 1.0}  # grams that still flow after cutoff: TUNE per pump
+W_LEAD_G = {"PUMP_A": 0.5, "PUMP_B": 0.5, "PUMP_C": 0.5}  # grams that still flow after cutoff: TUNE per pump
 DWELL_S = 1.5             # settle time after each pump cutoff
 POUR_TIMEOUT_S = 150.0    # max time for one ingredient (set from your measured flow rate)
 NO_FLOW_S = 10.0          # if less than NO_FLOW_MIN_G arrives by then: fault (unprimed / empty / kinked)

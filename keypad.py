@@ -34,10 +34,10 @@ COL_PINS = [7, 12, 16, 20]   # C1..C4
 # Standard 4x4 layout. If --map shows different results for your keypad,
 # edit this table (or reorder the pin lists above) to match.
 KEYMAP = [
-    ["1", "2", "3", "A"],
-    ["4", "5", "6", "B"],
-    ["7", "8", "9", "C"],
-    ["*", "0", "#", "D"],
+    ["D", "B", "C", "A"],
+    ["#", "6", "9", "3"],
+    ["0", "5", "8", "2"],
+    ["*", "4", "7", "1"],
 ]
 
 VALID_KEYS = {"1", "2", "3"}
